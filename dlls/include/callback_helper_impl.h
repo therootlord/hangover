@@ -48,8 +48,6 @@ void callback_init(struct callback_entry *entry, unsigned int params, void *proc
 
     entry->br = 0xd61f0000 | ((params + 1) << 5); /* br x[params + 1] */
 
-    entry->selfptr = entry;
-
     __clear_cache(&entry->ldr_self, &entry->br + 1);
 #elif defined(__x86_64__)
     /* See init_reverse_wndproc in dlls/user32/main.c for details. The only difference
@@ -80,11 +78,39 @@ void callback_init(struct callback_entry *entry, unsigned int params, void *proc
         memset(entry->code, 0xcc, sizeof(entry->code));
         memcpy(entry->code, wrapper_code3, sizeof(wrapper_code3));
     }
-    entry->selfptr = entry; /* Note that this is not read by the asm code, but put it in place anyway. */
+#elif defined(__powerpc64__)
+    size_t pos;
+    unsigned int reg = params + 3; /* first arg is in r3 on ppc64 */
+
+    /* tested from 0 to 6 parameters */
+
+    pos = (size_t)entry + offsetof(struct callback_entry, selfptr);
+    entry->ld_self[0] = 0x3c000000 | (reg << 21) | ((pos >> 48) & 0xffff);                  /* lis rX, highest */
+    entry->ld_self[1] = 0x60000000 | (reg << 21) | (reg << 16) | ((pos >> 32) & 0xffff);    /* ori rX, rX, higher */
+    entry->ld_self[2] = 0x780007c6 | (reg << 21) | (reg << 16);                             /* rldicr rX, rX, 32,31 */
+    entry->ld_self[3] = 0x64000000 | (reg << 21) | (reg << 16) | ((pos >> 16) & 0xffff);    /* oris rX, rX, high */
+    entry->ld_self[4] = 0x60000000 | (reg << 21) | (reg << 16) | (pos & 0xffff);            /* ori rX, rX, low */
+    entry->ld_self[5] = 0xe8000000 | (reg << 21) | (reg << 16);                             /* ld rX, 0(rX) */
+
+    reg++;
+    pos = (size_t)entry + offsetof(struct callback_entry, host_proc);
+    entry->ld_proc[0] = 0x3c000000 | (reg << 21) | ((pos >> 48) & 0xffff);                  /* lis rY, highest */
+    entry->ld_proc[1] = 0x60000000 | (reg << 21) | (reg << 16) | ((pos >> 32) & 0xffff);    /* ori rY, rY, higher */
+    entry->ld_proc[2] = 0x780007c6 | (reg << 21) | (reg << 16);                             /* rldicr rY, rY, 32,31 */
+    entry->ld_proc[3] = 0x64000000 | (reg << 21) | (reg << 16) | ((pos >> 16) & 0xffff);    /* oris rY, rY, high */
+    entry->ld_proc[4] = 0x60000000 | (reg << 21) | (reg << 16) | (pos & 0xffff);            /* ori rY, rY, low */
+    entry->ld_proc[5] = 0xe8000000 | (reg << 21) | (reg << 16);                             /* ld rY, 0(rY) */
+
+    entry->br[0] = 0x7c0c0378 | (reg << 21) | (reg << 11);                                  /* mr r12, rY */
+    entry->br[1] = 0x7d8903a6;                                                              /* mtctr r12 */
+    entry->br[2] = 0x4e800420;                                                              /* bctr */
+
+    __clear_cache(&entry->ldr_self, &entry->br + sizeof(entry->br));
 #else
 #error callback helper not supported on your platform
 #endif
 
+    entry->selfptr = entry;
     entry->host_proc = proc;
     entry->guest_proc = 0;
 }
